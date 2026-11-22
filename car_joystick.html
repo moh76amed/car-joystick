@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>جويستيك السيارة</title>
+<style>
+  :root { --bg:#0b1220; --panel:#131d33; --accent:#2e9bff; --ok:#2ecc71; --bad:#e74c3c; --text:#e8eefc; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font-family:system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif; overscroll-behavior:none; }
+  body { display:flex; flex-direction:column; align-items:center; gap:14px; padding:16px; touch-action:none; user-select:none; }
+  h1 { font-size:18px; margin:0; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:12px; padding:12px 22px; font-size:16px; }
+  #status { font-size:14px; padding:6px 12px; border-radius:20px; background:var(--panel); }
+  #status.on { color:var(--ok); } #status.off { color:var(--bad); }
+  #pad { position:relative; width:min(78vw,340px); aspect-ratio:1; border-radius:50%;
+    background:radial-gradient(circle at 50% 50%, #1a2a4d 0%, #101a30 70%);
+    border:2px solid #25406e; touch-action:none; }
+  #pad::before,#pad::after { content:""; position:absolute; background:#25406e55; }
+  #pad::before { left:50%; top:8%; bottom:8%; width:1px; }
+  #pad::after  { top:50%; left:8%; right:8%; height:1px; }
+  #knob { position:absolute; width:34%; aspect-ratio:1; border-radius:50%; left:33%; top:33%;
+    background:radial-gradient(circle at 35% 30%, #6fc0ff, var(--accent)); box-shadow:0 6px 20px #0008; }
+  .row { display:flex; gap:10px; align-items:center; width:min(90vw,380px); }
+  .row label { flex:0 0 auto; font-size:14px; }
+  input[type=range] { flex:1; accent-color:var(--accent); }
+  #read { font-family:ui-monospace,Consolas,monospace; font-size:14px; direction:ltr; opacity:.85; }
+  small { opacity:.65; text-align:center; max-width:360px; line-height:1.5; }
+</style>
+</head>
+<body>
+  <h1>🚗 جويستيك السيارة</h1>
+  <div id="status" class="off">غير متصل</div>
+  <button id="btn">اتصال بالسيارة</button>
+
+  <div id="pad"><div id="knob"></div></div>
+
+  <div class="row">
+    <label for="max">أقصى سرعة</label>
+    <input id="max" type="range" min="30" max="100" value="100">
+    <span id="maxv">100%</span>
+  </div>
+  <div id="read">x=0 y=0</div>
+  <small>اسحب الدائرة: للأعلى أمام، للأسفل خلف، يمين/يسار للتوجيه. عند رفع إصبعك تتوقف السيارة.
+  يعمل في Chrome على أندرويد (وليس Safari على آيفون).</small>
+
+<script>
+const NUS_SERVICE = '6e400001-b5a8-f393-e0a9-e50e24dcca9e';
+const NUS_RX      = '6e400002-b5a8-f393-e0a9-e50e24dcca9e';
+
+const statusEl = document.getElementById('status');
+const btn = document.getElementById('btn');
+const pad = document.getElementById('pad');
+const knob = document.getElementById('knob');
+const readEl = document.getElementById('read');
+const maxEl = document.getElementById('max');
+const maxv = document.getElementById('maxv');
+
+let device = null, rx = null, busy = false;
+let x = 0, y = 0, active = false, timer = null;
+const enc = new TextEncoder();
+
+maxEl.addEventListener('input', () => maxv.textContent = maxEl.value + '%');
+
+function setStatus(on, text) {
+  statusEl.textContent = text;
+  statusEl.className = on ? 'on' : 'off';
+}
+
+async function send(text) {
+  if (!rx || busy) return;
+  busy = true;
+  try { await rx.writeValueWithoutResponse(enc.encode(text)); }
+  catch (e) { /* تجاهل أخطاء الإرسال العابرة */ }
+  busy = false;
+}
+
+function sendStop() {
+  // نرسل التوقف عدة مرات لضمان الوصول
+  let n = 0;
+  const t = setInterval(() => { send('0,0\n'); if (++n >= 3) clearInterval(t); }, 40);
+}
+
+btn.addEventListener('click', async () => {
+  if (!navigator.bluetooth) { setStatus(false, 'المتصفح لا يدعم Web Bluetooth'); return; }
+  try {
+    device = await navigator.bluetooth.requestDevice({
+      acceptAllDevices: true,
+      optionalServices: [NUS_SERVICE]
+    });
+    device.addEventListener('gattserverdisconnected', () => {
+      rx = null; stopLoop(); setStatus(false, 'انقطع الاتصال');
+    });
+    setStatus(false, 'جارٍ الاتصال...');
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(NUS_SERVICE);
+    rx = await service.getCharacteristic(NUS_RX);
+    setStatus(true, 'متصل: ' + (device.name || 'ESP32'));
+  } catch (e) {
+    setStatus(false, 'فشل الاتصال: ' + (e.message || e));
+  }
+});
+
+// ---------- الجويستيك ----------
+function updateFromPointer(ev) {
+  const r = pad.getBoundingClientRect();
+  const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+  const R = r.width / 2 * 0.66;           // نصف قطر حركة المقبض
+  let dx = ev.clientX - cx, dy = ev.clientY - cy;
+  const d = Math.hypot(dx, dy);
+  if (d > R) { dx = dx / d * R; dy = dy / d * R; }
+  knob.style.left = (50 + dx / r.width * 100 - 17) + '%';
+  knob.style.top  = (50 + dy / r.height * 100 - 17) + '%';
+  const k = parseInt(maxEl.value, 10) / 100;
+  x = Math.round(dx / R * 100 * k);
+  y = Math.round(-dy / R * 100 * k);
+  readEl.textContent = `x=${x} y=${y}`;
+}
+
+function startLoop() {
+  if (timer) return;
+  timer = setInterval(() => send(`${x},${y}\n`), 60);
+}
+function stopLoop() {
+  if (timer) { clearInterval(timer); timer = null; }
+  x = 0; y = 0;
+  knob.style.left = '33%'; knob.style.top = '33%';
+  readEl.textContent = 'x=0 y=0';
+}
+
+pad.addEventListener('pointerdown', ev => {
+  active = true; pad.setPointerCapture(ev.pointerId);
+  updateFromPointer(ev); startLoop();
+});
+pad.addEventListener('pointermove', ev => { if (active) updateFromPointer(ev); });
+function release() {
+  if (!active) return;
+  active = false; stopLoop(); sendStop();
+}
+pad.addEventListener('pointerup', release);
+pad.addEventListener('pointercancel', release);
+pad.addEventListener('lostpointercapture', release);
+document.addEventListener('visibilitychange', () => { if (document.hidden) release(); });
+window.addEventListener('blur', release);
+</script>
+</body>
+</html>
